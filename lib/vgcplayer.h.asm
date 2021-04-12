@@ -5,6 +5,7 @@
 ; https://github.com/simondotm/vgm-packer
 ;******************************************************************
 
+LZ_STORE_BUFFER_INLINE=TRUE
 
 ;-------------------------------
 ; workspace/zeropage vars
@@ -14,7 +15,11 @@
 ; VGM player uses:
 ;  8 zero page vars without huffman
 ; 19 zero page vars with huffman
+IF LZ_STORE_BUFFER_INLINE=TRUE
+.VGM_ZP SKIP 10 ; must be in zero page 
+ELSE
 .VGM_ZP SKIP 8 ; must be in zero page 
+ENDIF
 
 ; declare zero page registers used for each compressed stream (they are context switched)
 lz_zp = VGM_ZP + 0
@@ -24,8 +29,9 @@ zp_literal_cnt  = lz_zp + 2    ; literal count LO/HI, 7 references
 zp_match_cnt    = lz_zp + 4    ; match count LO/HI, 10 references
 ; temporary vars
 zp_temp = lz_zp + 6 ; 2 bytes ; used only by lz_decode_byte and lz_fetch_count, does not need to be zp apart from memory/speed reasons
-
-
+IF LZ_STORE_BUFFER_INLINE=TRUE
+zp_window_dst = lz_zp + 8     ; used by lz_store_buffer.
+ENDIF
 
 ; The following vars only apply if Huffman support is enabled
 IF ENABLE_HUFFMAN

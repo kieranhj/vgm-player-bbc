@@ -5,6 +5,10 @@
 ; https://github.com/simondotm/vgm-packer
 ;******************************************************************
 
+IF LZ_STORE_BUFFER_INLINE=TRUE
+lz_window_dst = zp_window_dst
+ENDIF
+
 ;---------------------------------------------------------------
 ; VGM Player Library code
 ;---------------------------------------------------------------
@@ -611,14 +615,24 @@ IF LZ_FETCH_BUFFER_INLINE=FALSE
 }
 ENDIF
 
+MACRO LZ_STORE_BUFFER
+{
+    ldy #0                  ; [2]
+    sta (zp_window_dst),y   ; [6]
+    inc zp_window_dst       ; [5]
+}
+ENDMACRO
+
 ; push byte into decode buffer
 ; clobbers Y, preserves A
+IF LZ_STORE_BUFFER_INLINE=FALSE
 .lz_store_buffer    ; called twice - 4 byte overhead, 6 byte function. Cheaper to inline.
 {
-    sta &ffff   ; *** SELF MODIFIED ***
-    inc lz_store_buffer+1
-    rts                 ; [6] (1)
+    sta &ffff   ; *** SELF MODIFIED *** [4]
+    inc lz_store_buffer+1   ; [6]
+    rts                     ; [6] (1)
 }
+ENDIF
 
 ; Calculate a multi-byte lz4 style length into zp_temp
 ; On entry A contains the initial counter value (LO)
@@ -693,7 +707,11 @@ IF LZ_FETCH_BYTE_INLINE
 ELSE
     jsr lz_fetch_byte           ; [6] +6 RTS
 ENDIF
+IF LZ_STORE_BUFFER_INLINE
+    LZ_STORE_BUFFER
+ELSE
     jsr lz_store_buffer         ; [6] +6 RTS
+ENDIF
     sta stashA+1   ; **SELF MODIFICATION**
 
 IF USE_FAST_COUNTER
@@ -807,7 +825,11 @@ IF LZ_FETCH_BUFFER_INLINE
 ELSE
     jsr lz_fetch_buffer    ; fetch matched byte from decode buffer
 ENDIF
+IF LZ_STORE_BUFFER_INLINE
+    LZ_STORE_BUFFER
+ELSE
     jsr lz_store_buffer    ; stash in decode buffer
+ENDIF
     sta stashAA+1 ; **SELF MODIFICATION**
 
     ; for all matches
@@ -1033,8 +1055,9 @@ ENDIF ; ENABLE_HUFFMAN
 
 ; provide these vars as cleaner addresses for the code address to be self modified
 lz_window_src = lz_fetch_buffer + 1 ; window read ptr LO (2 bytes) - index, 3 references
+IF LZ_STORE_BUFFER_INLINE=FALSE
 lz_window_dst = lz_store_buffer + 1 ; window write ptr LO (2 bytes) - index, 3 references
-
+ENDIF
 
 
 PRINT "    decoder code size is", (decoder_end-decoder_start), "bytes"
