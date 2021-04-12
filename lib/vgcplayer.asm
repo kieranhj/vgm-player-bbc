@@ -37,7 +37,6 @@ VGM_FX_VOL3     = 7 ; noise
 VGM_FX_TONE0_HI = 8
 VGM_FX_TONE1_HI = 9
 VGM_FX_TONE2_HI = 10
-
 ENDIF
 
 ;-------------------------------------------
@@ -124,12 +123,9 @@ ENDIF
 ; Sound chip routines
 ;-------------------------------------------
 
+SN_WRITE_INLINE=TRUE ; modest benefit.
 
-
-; Write data to SN76489 sound chip
-; A contains data to be written to sound chip
-; clobbers X, A is non-zero on exit
-.sn_write
+MACRO SN_WRITE
 {
     ldx #255
     stx &fe43
@@ -139,6 +135,15 @@ ENDIF
     lda &fe40
     ora #8
     sta &fe40
+}
+ENDMACRO
+
+; Write data to SN76489 sound chip
+; A contains data to be written to sound chip
+; clobbers X, A is non-zero on exit
+.sn_write
+{
+    SN_WRITE
     rts ; 21 bytes
 }
 
@@ -187,7 +192,7 @@ VGM_STREAMS = 8
 .vgm_buffers  equb 0    ; the HI byte of the address where the buffers are stored
 .vgm_finished equb 0    ; a flag to indicate player has reached the end of the vgm stream
 .vgm_flags  equb 0      ; flags for current vgm file. bit7 set stream is huffman coded. bit 6 set if stream is 16-bit LZ4 offsets
-.vgm_temp equb 0        ; used by vgm_update_register1()
+.vgm_register equb 0    ; used by vgm_update_register1()
 .vgm_loop equb 0        ; non zero if tune is to be looped
 .vgm_source equw 0      ; vgm data address
 
@@ -388,12 +393,13 @@ ENDIF ;ENABLE_HUFFMAN
     rts
 }
 
+; TODO: Comment correctly.
 ;----------------------------------------------------------------------
 ; fetch register data byte from register stream selected in A
 ; This byte will be LZ4 encoded
 ;  A is register id (0-7)
 ;  clobbers X,Y
-.vgm_get_register_data
+.vgm_load_context_for_register
 {
     ; set the LZ4 decoder stream workspace buffer (initialised by vgm_stream_mount)
     tax
@@ -402,9 +408,6 @@ ENDIF ;ENABLE_HUFFMAN
     ; store hi byte of where the 256 byte vgm stream buffer for this stream is located
     sta lz_window_src+1 ; **SELFMOD**
     sta lz_window_dst+1 ; **SELFMOD**
-
-    ; calculate the stream buffer context
-    stx loadX+1 ; Stash X for later *** SELF MODIFYING SEE BELOW ***
 
     ; since we have 8 separately compressed register streams
     ; we have to load the required decoder context to ZP
@@ -435,15 +438,11 @@ IF ENABLE_HUFFMAN
     lda vgm_streams + VGM_STREAMS*9, x
     sta zp_huff_bitsleft
 ENDIF
+    rts
+}
 
-    ; then fetch a decompressed byte
-    jsr lz_decode_byte
-    sta loadA+1 ; Stash A for later - ** SMOD ** [4](2) faster than pha/pla 
-
-    ; then we save the decoder context from ZP back to main ram
-.loadX
-    ldx #0  ; *** SELF MODIFIED - See above ***
-
+.vgm_save_context_for_register
+{
     lda zp_stream_src + 0
     sta vgm_streams + VGM_STREAMS*0, x
     lda zp_stream_src + 1
@@ -472,8 +471,6 @@ IF ENABLE_HUFFMAN
     sta vgm_streams + VGM_STREAMS*9, x
 ENDIF
 
-.loadA
-    lda #0 ;[2](2) - ***SELF MODIFIED - See above ***
     rts
 }
 
@@ -492,17 +489,34 @@ ENDIF
     bne skip_register_update
 
     ; decode a byte & send to psg
-    stx vgm_temp
-    jsr vgm_get_register_data
+    stx vgm_register
+    jsr vgm_load_context_for_register
+    jsr vgm_update_register_in_context
+    jmp vgm_save_context_for_register
+}
+.skip_register_update
+{
+    rts
+}
+
+.vgm_update_register_in_context
+{
+    ; then fetch a decompressed byte
+    jsr lz_decode_byte
+
     tay
     and #&0f
-    ldx vgm_temp
+    ldx vgm_register
     ora vgm_register_headers,x
     ; check if it's a tone3 skip command (&ef) before we play it
     ; - this prevents the LFSR being reset unnecessarily
     cmp #&ef
     beq skip_tone3
+IF SN_WRITE_INLINE
+    SN_WRITE ; clobbers X
+ELSE
     jsr sn_write ; clobbers X
+ENDIF
 .skip_tone3
     ; get run length (top 4-bits + 1)
     tya
@@ -512,7 +526,7 @@ ENDIF
     lsr a
     clc
     adc #1
-    ldx vgm_temp
+    ldx vgm_register
     sta vgm_register_counts,x
 
 IF ENABLE_VGM_FX
@@ -527,9 +541,6 @@ IF ENABLE_VGM_FX
 ENDIF
 
     sec
-}
-.skip_register_update
-{
     rts
 }
 
@@ -537,17 +548,29 @@ ENDIF
 ; Same parameters as vgm_update_register1
 .vgm_update_register2
 {
-    jsr vgm_update_register1    ; returns stream in X if updated, and C=0 if no update needed
-    bcc skip_register_update
+    tax
+    clc
+    dec vgm_register_counts,x ; no effect on C
+    bne skip_register_update
+
+    ; decode a byte & send to psg
+    stx vgm_register
+    jsr vgm_load_context_for_register
+    jsr vgm_update_register_in_context
 
     ; decode 2nd byte and send to psg as (DATA)
-    txa
-    jsr vgm_get_register_data
+    jsr lz_decode_byte
 IF ENABLE_VGM_FX
-    ldx vgm_temp ; still contains the stream id from previous call to vgm_update_register1()
+    ldx vgm_register ; still contains the stream id from previous call to vgm_update_register1()
     sta vgm_fx+8,x ; store the register (0-2) setting for fx
-ENDIF    
-    jmp sn_write ; clobbers X
+ENDIF
+IF SN_WRITE_INLINE
+    SN_WRITE ; clobbers X
+ELSE
+    jsr sn_write ; clobbers X
+ENDIF
+    ldx vgm_register ; still contains the stream id from previous call to vgm_update_register1()
+    jmp vgm_save_context_for_register
 }
 
 
@@ -561,16 +584,32 @@ ENDIF
 ; lz4 decoder
 ;-------------------------------
 
+LZ_FETCH_BYTE_INLINE=(TRUE AND ENABLE_HUFFMAN=FALSE) ; modest but adds up.
 
+MACRO LZ_FETCH_BYTE
+{
+    ; otherwise plain LZ4 byte fetch
+    ldy #0
+    lda (zp_stream_src),y
+    inc zp_stream_src+0
+    bne ok
+    inc zp_stream_src+1
+.ok
+}
+ENDMACRO
+
+LZ_FETCH_BUFFER_INLINE=TRUE ; modest but adds up.
 
 ; fetch a byte from the current decode buffer at the current read ptr offset
 ; returns byte in A, clobbers Y
+IF LZ_FETCH_BUFFER_INLINE=FALSE
 .lz_fetch_buffer
 {
     lda &ffff           ; *** SELF MODIFIED ***
     inc lz_fetch_buffer+1
     rts
 }
+ENDIF
 
 ; push byte into decode buffer
 ; clobbers Y, preserves A
@@ -580,12 +619,6 @@ ENDIF
     inc lz_store_buffer+1
     rts                 ; [6] (1)
 }
-
-; provide these vars as cleaner addresses for the code address to be self modified
-lz_window_src = lz_fetch_buffer + 1 ; window read ptr LO (2 bytes) - index, 3 references
-lz_window_dst = lz_store_buffer + 1 ; window write ptr LO (2 bytes) - index, 3 references
-
-
 
 ; Calculate a multi-byte lz4 style length into zp_temp
 ; On entry A contains the initial counter value (LO)
@@ -601,8 +634,11 @@ lz_window_dst = lz_store_buffer + 1 ; window write ptr LO (2 bytes) - index, 3 r
 
 .fetch
 .fetchByte1
-
+IF LZ_FETCH_BYTE_INLINE
+    LZ_FETCH_BYTE
+ELSE
     jsr lz_fetch_byte
+ENDIF
     tay
     clc
     adc zp_temp+0
@@ -652,7 +688,11 @@ USE_FAST_COUNTER = TRUE
 .fetchByte2
 
     ; fetch a literal & stash in decode buffer
+IF LZ_FETCH_BYTE_INLINE
+    LZ_FETCH_BYTE
+ELSE
     jsr lz_fetch_byte           ; [6] +6 RTS
+ENDIF
     jsr lz_store_buffer         ; [6] +6 RTS
     sta stashA+1   ; **SELF MODIFICATION**
 
@@ -699,7 +739,11 @@ ENDIF
 .fetchByte3
 
     ; get match offset LO
-    jsr lz_fetch_byte     
+IF LZ_FETCH_BYTE_INLINE
+    LZ_FETCH_BYTE
+ELSE
+    jsr lz_fetch_byte           ; [6] +6 RTS
+ENDIF
 
     ; set buffer read ptr
     ;sta zp_temp
@@ -715,7 +759,11 @@ IF LZ4_FORMAT
     ; fetch match offset HI, but ignore it.
     ; this implementation only supports 8-bit windows.
 .fetchByte4
-    jsr lz_fetch_byte    
+IF LZ_FETCH_BYTE_INLINE
+    LZ_FETCH_BYTE
+ELSE
+    jsr lz_fetch_byte           ; [6] +6 RTS
+ENDIF
 ENDIF
 
     ; fetch match length
@@ -750,7 +798,15 @@ ENDIF
 
 .is_match
 
+IF LZ_FETCH_BUFFER_INLINE
+.lz_fetch_buffer
+{
+    lda &ffff           ; *** SELF MODIFIED ***
+    inc lz_fetch_buffer+1
+}
+ELSE
     jsr lz_fetch_buffer    ; fetch matched byte from decode buffer
+ENDIF
     jsr lz_store_buffer    ; stash in decode buffer
     sta stashAA+1 ; **SELF MODIFICATION**
 
@@ -772,7 +828,11 @@ ENDIF
 .try_token
 .fetchByte5
     ; fetch a token
-    jsr lz_fetch_byte     
+IF LZ_FETCH_BYTE_INLINE
+    LZ_FETCH_BYTE
+ELSE
+    jsr lz_fetch_byte           ; [6] +6 RTS
+ENDIF
 
     tax
     ldy #0
@@ -823,11 +883,10 @@ ENDIF
 
 
 
-
-
 ; fetch a byte from the currently selected compressed register data stream
 ; either huffman encoded or plain data
 ; returns byte in A, clobbers Y
+IF LZ_FETCH_BYTE_INLINE=FALSE
 .lz_fetch_byte
 {
 IF ENABLE_HUFFMAN == TRUE
@@ -838,16 +897,10 @@ IF HUFFMAN_INLINE == FALSE
 ENDIF ; HUFFMAN_INLINE
 ENDIF ; ENABLE_HUFFMAN
 
-    ; otherwise plain LZ4 byte fetch
-    ldy #0
-    lda (zp_stream_src),y
-    inc zp_stream_src+0
-    bne ok
-    inc zp_stream_src+1
-.ok
+    LZ_FETCH_BYTE
     rts
 }
-
+ENDIF
 
 IF ENABLE_HUFFMAN
 
@@ -978,6 +1031,9 @@ ENDIF ; ENABLE_HUFFMAN
 
 .decoder_end
 
+; provide these vars as cleaner addresses for the code address to be self modified
+lz_window_src = lz_fetch_buffer + 1 ; window read ptr LO (2 bytes) - index, 3 references
+lz_window_dst = lz_store_buffer + 1 ; window write ptr LO (2 bytes) - index, 3 references
 
 
 
