@@ -119,6 +119,68 @@ ENDIF
 }
 
 
+;-------------------------------------------
+; vgm_seek
+;-------------------------------------------
+;  seek to frame YYXX in the stream
+; On entry X is low byte of count, Y is high byte of count
+;  returns non-zero if beyond end of the stream
+;-------------------------------------------
+.vgm_seek
+{
+    ; negate the counter so we can increment it rather than decrement it
+    clc
+    txa:eor #&ff:adc #1:sta seek_frame+0
+    tya:eor #&ff:adc #0:sta seek_frame+1
+
+    ; store loop flag
+    lda vgm_loop:pha
+
+    ; hack sn_write
+    lda sn_write+0:pha
+    lda #&60:sta sn_write+0 ; rts
+
+    ; restart stream
+    ldx vgm_source+0
+    ldy vgm_source+1
+    lda vgm_buffers
+    clc ; no loop
+    jsr vgm_init
+
+    lda seek_frame+0
+    ora seek_frame+1
+    beq done
+
+.seek_loop
+    
+    jsr vgm_update
+    bne done
+
+    ; using inverted counter
+    inc seek_frame+0
+    bne no_carry
+    inc seek_frame+1
+    .no_carry
+    bne seek_loop
+    
+.done
+    ; restore sn_write
+    pla:sta sn_write+0
+
+    ; restore loop flag
+    pla:sta vgm_loop
+
+    ; return 0 if success
+    lda seek_frame+0
+    ora seek_frame+1
+    rts
+
+.seek_frame
+    equw 0
+}
+
+
+
 
 ;-------------------------------------------
 ; Sound chip routines

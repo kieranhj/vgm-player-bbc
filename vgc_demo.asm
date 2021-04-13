@@ -55,12 +55,23 @@ INCLUDE "lib/vgcplayer.asm"
 ALIGN 256
 .main
 {
+    lda #'A':jsr &ffee:lda #10:jsr &ffee
+
     ; initialize the vgm player with a vgc data stream
     lda #hi(vgm_stream_buffers)
     ldx #lo(vgm_data)
     ldy #hi(vgm_data)
     sec ; set carry to enable looping
     jsr vgm_init
+
+    lda #'B':jsr &ffee:lda #10:jsr &ffee
+
+    ldx #LO(180*50)
+    ldy #HI(180*50)
+    jsr vgm_seek
+
+    adc #'C'    
+    jsr &ffee:lda #10:jsr &ffee
 
     ; loop & update
     sei
