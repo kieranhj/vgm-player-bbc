@@ -17,3 +17,6 @@ ENABLE_HUFFMAN = FALSE
 
 ; Enable this to capture the SN chip register settings (for fx etc.)
 ENABLE_VGM_FX = TRUE
+
+; Kieran's old playback optimisations.
+ENABLE_LZ_INLINE=TRUE

@@ -5,6 +5,10 @@
 ; https://github.com/simondotm/vgm-packer
 ;******************************************************************
 
+IF LZ_STORE_BUFFER_INLINE=TRUE
+lz_window_dst = zp_window_dst
+ENDIF
+
 ;---------------------------------------------------------------
 ; VGM Player Library code
 ;---------------------------------------------------------------
@@ -561,29 +565,52 @@ ENDIF
 ; lz4 decoder
 ;-------------------------------
 
+LZ_FETCH_BYTE_INLINE=(ENABLE_LZ_INLINE AND ENABLE_HUFFMAN=FALSE) ; modest but adds up.
+
+MACRO LZ_FETCH_BYTE
+{
+    ; otherwise plain LZ4 byte fetch
+    ldy #0
+    lda (zp_stream_src),y
+    inc zp_stream_src+0
+    bne ok
+    inc zp_stream_src+1
+.ok
+}
+ENDMACRO
+
+LZ_FETCH_BUFFER_INLINE=ENABLE_LZ_INLINE ; modest but adds up.
 
 
 ; fetch a byte from the current decode buffer at the current read ptr offset
 ; returns byte in A, clobbers Y
+IF LZ_FETCH_BUFFER_INLINE=FALSE
 .lz_fetch_buffer
 {
     lda &ffff           ; *** SELF MODIFIED ***
     inc lz_fetch_buffer+1
     rts
 }
+ENDIF
+
+MACRO LZ_STORE_BUFFER
+{
+    ldy #0                  ; [2]
+    sta (zp_window_dst),y   ; [6]
+    inc zp_window_dst       ; [5]
+}
+ENDMACRO
 
 ; push byte into decode buffer
 ; clobbers Y, preserves A
+IF LZ_STORE_BUFFER_INLINE=FALSE
 .lz_store_buffer    ; called twice - 4 byte overhead, 6 byte function. Cheaper to inline.
 {
     sta &ffff   ; *** SELF MODIFIED ***
     inc lz_store_buffer+1
     rts                 ; [6] (1)
 }
-
-; provide these vars as cleaner addresses for the code address to be self modified
-lz_window_src = lz_fetch_buffer + 1 ; window read ptr LO (2 bytes) - index, 3 references
-lz_window_dst = lz_store_buffer + 1 ; window write ptr LO (2 bytes) - index, 3 references
+ENDIF
 
 
 
@@ -601,8 +628,11 @@ lz_window_dst = lz_store_buffer + 1 ; window write ptr LO (2 bytes) - index, 3 r
 
 .fetch
 .fetchByte1
-
+IF LZ_FETCH_BYTE_INLINE
+    LZ_FETCH_BYTE
+ELSE
     jsr lz_fetch_byte
+ENDIF
     tay
     clc
     adc zp_temp+0
@@ -652,8 +682,16 @@ USE_FAST_COUNTER = TRUE
 .fetchByte2
 
     ; fetch a literal & stash in decode buffer
+IF LZ_FETCH_BYTE_INLINE
+    LZ_FETCH_BYTE
+ELSE
     jsr lz_fetch_byte           ; [6] +6 RTS
+ENDIF
+IF LZ_STORE_BUFFER_INLINE
+    LZ_STORE_BUFFER
+ELSE
     jsr lz_store_buffer         ; [6] +6 RTS
+ENDIF
     sta stashA+1   ; **SELF MODIFICATION**
 
 IF USE_FAST_COUNTER
@@ -699,7 +737,11 @@ ENDIF
 .fetchByte3
 
     ; get match offset LO
-    jsr lz_fetch_byte     
+IF LZ_FETCH_BYTE_INLINE
+    LZ_FETCH_BYTE
+ELSE
+    jsr lz_fetch_byte           ; [6] +6 RTS
+ENDIF
 
     ; set buffer read ptr
     ;sta zp_temp
@@ -715,7 +757,11 @@ IF LZ4_FORMAT
     ; fetch match offset HI, but ignore it.
     ; this implementation only supports 8-bit windows.
 .fetchByte4
-    jsr lz_fetch_byte    
+IF LZ_FETCH_BYTE_INLINE
+    LZ_FETCH_BYTE
+ELSE
+    jsr lz_fetch_byte           ; [6] +6 RTS
+ENDIF
 ENDIF
 
     ; fetch match length
@@ -750,8 +796,20 @@ ENDIF
 
 .is_match
 
+IF LZ_FETCH_BUFFER_INLINE
+.lz_fetch_buffer
+{
+    lda &ffff           ; *** SELF MODIFIED ***
+    inc lz_fetch_buffer+1
+}
+ELSE
     jsr lz_fetch_buffer    ; fetch matched byte from decode buffer
+ENDIF
+IF LZ_STORE_BUFFER_INLINE
+    LZ_STORE_BUFFER
+ELSE
     jsr lz_store_buffer    ; stash in decode buffer
+ENDIF
     sta stashAA+1 ; **SELF MODIFICATION**
 
     ; for all matches
@@ -772,7 +830,11 @@ ENDIF
 .try_token
 .fetchByte5
     ; fetch a token
-    jsr lz_fetch_byte     
+IF LZ_FETCH_BYTE_INLINE
+    LZ_FETCH_BYTE
+ELSE
+    jsr lz_fetch_byte           ; [6] +6 RTS
+ENDIF
 
     tax
     ldy #0
@@ -828,6 +890,7 @@ ENDIF
 ; fetch a byte from the currently selected compressed register data stream
 ; either huffman encoded or plain data
 ; returns byte in A, clobbers Y
+IF LZ_FETCH_BYTE_INLINE=FALSE
 .lz_fetch_byte
 {
 IF ENABLE_HUFFMAN == TRUE
@@ -839,14 +902,11 @@ ENDIF ; HUFFMAN_INLINE
 ENDIF ; ENABLE_HUFFMAN
 
     ; otherwise plain LZ4 byte fetch
-    ldy #0
-    lda (zp_stream_src),y
-    inc zp_stream_src+0
-    bne ok
-    inc zp_stream_src+1
+    LZ_FETCH_BYTE
 .ok
     rts
 }
+ENDIF
 
 
 IF ENABLE_HUFFMAN
@@ -978,6 +1038,11 @@ ENDIF ; ENABLE_HUFFMAN
 
 .decoder_end
 
+; provide these vars as cleaner addresses for the code address to be self modified
+lz_window_src = lz_fetch_buffer + 1 ; window read ptr LO (2 bytes) - index, 3 references
+IF LZ_STORE_BUFFER_INLINE=FALSE
+lz_window_dst = lz_store_buffer + 1 ; window write ptr LO (2 bytes) - index, 3 references
+ENDIF
 
 
 
