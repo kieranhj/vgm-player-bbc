@@ -77,3 +77,32 @@ The Huffman enabled decoder requires 19 zero page vars and ~924 bytes of code ra
 
 Both decoders require a 2Kb page aligned workspace ram buffer which can be passed to the decoder via `vgm_init()`.
 
+---
+
+## Optimised VGC player (`lib/vgcplayer_opt.asm`)
+
+> Note: `lib/vgcplayer_opt.asm`, `vgc_opt_demo.asm`, `test/vgc_opt/` and
+> `docs/vgc-optimised-player.md` were produced with the assistance of an AI model
+> (Claude Opus 4.8 / `claude-opus-4-8`). Each file carries an AI-generated banner.
+
+`lib/vgcplayer_opt.asm` is a drop-in faster variant of `lib/vgcplayer.asm`. It
+plays the same `.vgc` files, produces **byte-identical** SN76489 output, uses the
+**same 8 zero-page vars and 2 KB workspace**, and is **~1.3× faster per frame for
+less code** (757 → 691 bytes). It does this by keeping each stream's LZ context
+**resident** (accessed `abs,X` in place) instead of copying an 8-byte context to
+and from zero page on every decoded byte — which was ~38% of the original frame
+cost. Huffman is **not** supported by this variant (`ENABLE_HUFFMAN = FALSE`).
+
+It shares the same `lib/vgcplayer.h.asm` header as the standard player; just
+`INCLUDE "lib/vgcplayer_opt.asm"` in place of `lib/vgcplayer.asm`. The user API
+(`vgm_init`/`vgm_update`/`sn_reset`/`sn_write`) is unchanged.
+
+* `vgc_opt_demo.asm` — example BeebAsm project (build with `beebasm -i
+  vgc_opt_demo.asm -do vgc_opt_demo.ssd -boot Main`). It brackets `vgm_update`
+  with palette writes so the on-screen raster band height = the player's
+  per-frame CPU cost.
+* `test/vgc_opt/` — builds both players, plays a tune through in a 6502
+  simulator and asserts the SN76489 output is byte-identical, then reports the
+  speedup (`pip install py65 numpy`, then `python measure.py`).
+* `docs/vgc-optimised-player.md` — full analysis of what changed and why.
+

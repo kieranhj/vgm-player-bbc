@@ -1,0 +1,4 @@
+# build artifacts produced by measure.py
+Vgc
+Vgc*.ssd
+labels*.txt
