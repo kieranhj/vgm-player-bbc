@@ -77,3 +77,41 @@ The Huffman enabled decoder requires 19 zero page vars and ~924 bytes of code ra
 
 Both decoders require a 2Kb page aligned workspace ram buffer which can be passed to the decoder via `vgm_init()`.
 
+---
+
+## `VGI` Player (incremental decode, bounded per-frame cost)
+
+> Note: `lib/vgiplayer.asm`, `lib/vgiplayer.h.asm`, `vgi_demo.asm`,
+> `test/vgi/` and `docs/vgi-player.md` were produced with the assistance of an
+> AI model (Claude Opus 4.8 / `claude-opus-4-8`). Each file carries an
+> AI-generated banner.
+
+`lib/vgiplayer.asm` is an alternative VGM player with the **same user API** as
+the VGC player (`vgm_init` / `vgm_update` / `sn_reset` / `sn_write`). It plays
+`.vgi` files made by `vgipacker.py` (in the
+[vgm-packer](https://github.com/simondotm/vgm-packer) repo).
+
+The VGC player runs RLE+LZ4, so its decode cost **spikes** (cheap RLE-counter
+frames, occasional expensive LZ4 refills). The VGI player runs a byte-aligned
+LZSS per register column with **no RLE**, decoded **one value per stream per
+frame**, so the per-frame cost is **bounded independently of match/run length**
+— low, flat and predictable, which is what a raster-budgeted demo needs.
+Verified byte-exact against the VGC player: over the 9602-frame `acid_demo` the
+worst frame is **~2.4–2.7k cycles vs the VGC player's ~5.3k**. The trade is
+size: `.vgi` is ~1.4× `.vgc`, and the workspace is **11×256 = 2.75 KB** (vs 2 KB
+for VGC).
+
+It builds two ways via a `-D` flag (passed on every build): `VGI_UNROLL=0`
+(compact looped, default) or `VGI_UNROLL=1` (faster unrolled, +~0.5 KB code).
+
+* `vgi_demo.asm` — example BeebAsm project (build with `beebasm -i vgi_demo.asm
+  -D VGI_UNROLL=0 -do vgi_demo.ssd -boot Main -title VGIPLAY`). It brackets
+  `vgm_update` with palette writes so the on-screen raster band height = the
+  player's per-frame CPU cost.
+* `test/vgi/` — builds the VGI and VGC players, plays a tune through a 6502
+  simulator and asserts the reconstructed SN76489 register state is identical
+  each frame, then reports the per-frame cost (`pip install py65 numpy`, then
+  `python measure.py`).
+* `docs/vgi-player.md` — full analysis, the measured comparison and the design
+  rationale.
+
