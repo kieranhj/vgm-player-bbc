@@ -14,7 +14,8 @@ repo) and exposes the **same user API** as the VGC player —
 `vgm_init` / `vgm_update` / `sn_reset` / `sn_write` — so it is a drop-in
 alternative for code that already drives `lib/vgcplayer.asm`.
 
-It builds for either of two file versions, and **v3 is the one to use**:
+It builds for either of two file versions, and **v3 is the one to use** - it
+is what `vgipacker.py` emits by default:
 
 - `-D VGI_V3=0` plays `.vgi` **v2**: 11 register columns, an 11×256 workspace,
   files ~1.4× `.vgc`. Chosen over `.vgc` when the *worst-case* per-frame time
@@ -197,4 +198,4 @@ python measure.py             # set $BEEBASM if beebasm is not auto-found
 It prints `SN76489 state IDENTICAL` for all four VGI builds and `RESULT: PASS`
 when they match the stock VGC player frame-for-frame. It needs both `.vgi` files
 of the test tune: `music/vgi/acid_demo.vgi` (v2) and `music/vgi/acid_demo.v3.vgi`
-(v3), packed by `vgipacker.py` with and without `--v3`.
+(v3), packed by `vgipacker.py` with `--v2` and with its default (v3).
