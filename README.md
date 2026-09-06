@@ -97,20 +97,30 @@ LZSS per register column with **no RLE**, decoded **one value per stream per
 frame**, so the per-frame cost is **bounded independently of match/run length**
 — low, flat and predictable, which is what a raster-budgeted demo needs.
 Verified byte-exact against the VGC player: over the 9602-frame `acid_demo` the
-worst frame is **~2.4–2.7k cycles vs the VGC player's ~5.3k**. The trade is
-size: `.vgi` is ~1.4× `.vgc`, and the workspace is **11×256 = 2.75 KB** (vs 2 KB
-for VGC).
+worst frame is **~1.9–2.7k cycles vs the VGC player's ~5.3k**.
 
-It builds two ways via a `-D` flag (passed on every build): `VGI_UNROLL=0`
-(compact looped, default) or `VGI_UNROLL=1` (faster unrolled, +~0.5 KB code).
+It plays either of two file versions, chosen at build time:
+
+* **v3** (`-D VGI_V3=1`) — **the one to use.** Each channel's tone period is a
+  byte index into a table the packer builds, so there are 8 columns and not 11.
+  Files are 21–29% smaller (about `.vgc`'s size), the workspace drops to
+  **8×256 = 2 KB**, and with three fewer streams to decode it beats the stock
+  VGC player at *both* ends — mean **985** cycles against 1788, worst frame
+  **1894** against 5321.
+* **v2** (`-D VGI_V3=0`) — 11 raw register columns, an 11×256 = 2.75 KB
+  workspace, files ~1.4× `.vgc`. Mean 1149–1572, worst 2377–2677.
+
+A build plays one version; `vgm_init` checks the file's version byte and refuses
+a mismatch. The second `-D` flag is `VGI_UNROLL=0` (compact looped, default) or
+`VGI_UNROLL=1` (faster unrolled); both are passed on every build.
 
 * `vgi_demo.asm` — example BeebAsm project (build with `beebasm -i vgi_demo.asm
-  -D VGI_UNROLL=0 -do vgi_demo.ssd -boot Main -title VGIPLAY`). It brackets
+  -D VGI_UNROLL=0 -D VGI_V3=1 -do vgi_demo.ssd -boot Main -title VGIPLAY`). It brackets
   `vgm_update` with palette writes so the on-screen raster band height = the
   player's per-frame CPU cost.
-* `test/vgi/` — builds the VGI and VGC players, plays a tune through a 6502
-  simulator and asserts the reconstructed SN76489 register state is identical
-  each frame, then reports the per-frame cost (`pip install py65 numpy`, then
+* `test/vgi/` — builds the VGC player and all four VGI builds (looped/unrolled
+  × v2/v3), plays a tune through a 6502 simulator and asserts the reconstructed
+  SN76489 register state is identical each frame, then reports the per-frame cost (`pip install py65 numpy`, then
   `python measure.py`).
 * `docs/vgi-player.md` — full analysis, the measured comparison and the design
   rationale.

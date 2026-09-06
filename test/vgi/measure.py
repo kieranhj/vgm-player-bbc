@@ -6,8 +6,8 @@
 # the stock VGC player, and time it. Generated with the assistance of
 # an AI model: Claude Opus 4.8 (claude-opus-4-8).
 #
-# Builds three players with beebasm - the VGC player (sim_vgc.asm) and the
-# VGI player twice (sim_vgi.asm with VGI_UNROLL=FALSE and =TRUE) - over the
+# Builds five players with beebasm - the VGC player (sim_vgc.asm) and the
+# VGI player four times (sim_vgi.asm over VGI_UNROLL x VGI_V3) - over the
 # SAME tune (acid_demo, as both .vgc and .vgi). Each is run in a py65 6502
 # simulator; every byte written to the SN76489 data port (&FE4F) is captured
 # per frame and replayed through a model of the chip's latch/registers, so we
@@ -157,34 +157,54 @@ def compare(name, vgi_snaps, vgc_snaps):
 def main():
     print("building VGC (stock) ...")
     vgc_img, vgc_lab = build("sim_vgc.asm", {}, "Vgc", "vgc")
-    print("building VGI looped (VGI_UNROLL=0) ...")
-    vl_img, vl_lab = build("sim_vgi.asm", {"VGI_UNROLL": "0"}, "Vgi", "vgi_looped")
-    print("building VGI unrolled (VGI_UNROLL=1) ...")
-    vu_img, vu_lab = build("sim_vgi.asm", {"VGI_UNROLL": "1"}, "Vgi", "vgi_unroll")
+    print("building VGI v2 looped (VGI_UNROLL=0 VGI_V3=0) ...")
+    vl_img, vl_lab = build("sim_vgi.asm", {"VGI_UNROLL": "0", "VGI_V3": "0"},
+                           "Vgi", "vgi_looped")
+    print("building VGI v2 unrolled (VGI_UNROLL=1 VGI_V3=0) ...")
+    vu_img, vu_lab = build("sim_vgi.asm", {"VGI_UNROLL": "1", "VGI_V3": "0"},
+                           "Vgi", "vgi_unroll")
+    print("building VGI v3 looped (VGI_UNROLL=0 VGI_V3=1) ...")
+    v3l_img, v3l_lab = build("sim_vgi.asm", {"VGI_UNROLL": "0", "VGI_V3": "1"},
+                             "Vgi", "vgi_v3_looped")
+    print("building VGI v3 unrolled (VGI_UNROLL=1 VGI_V3=1) ...")
+    v3u_img, v3u_lab = build("sim_vgi.asm", {"VGI_UNROLL": "1", "VGI_V3": "1"},
+                             "Vgi", "vgi_v3_unroll")
 
     vgc_f, vgc_pf = run(vgc_img, vgc_lab)
     vl_f, vl_pf = run(vl_img, vl_lab)
     vu_f, vu_pf = run(vu_img, vu_lab)
+    v3l_f, v3l_pf = run(v3l_img, v3l_lab)
+    v3u_f, v3u_pf = run(v3u_img, v3u_lab)
 
     vgc_s = reconstruct(vgc_f)
     vl_s = reconstruct(vl_f)
     vu_s = reconstruct(vu_f)
+    v3l_s = reconstruct(v3l_f)
+    v3u_s = reconstruct(v3u_f)
 
     print("\nbyte-exact check (reconstructed SN76489 register state vs VGC):")
-    ok_l = compare("VGI looped", vl_s, vgc_s)
-    ok_u = compare("VGI unrolled", vu_s, vgc_s)
-    # the two VGI builds must of course agree with each other too
-    ok_lu = (vl_s == vu_s)
-    print("  %-16s %s" % ("VGI looped==unrolled", "YES" if ok_lu else "*** NO ***"))
+    ok_l = compare("VGI v2 looped", vl_s, vgc_s)
+    ok_u = compare("VGI v2 unrolled", vu_s, vgc_s)
+    # v3 reads a different FILE - 8 indexed columns instead of 11 raw ones - so
+    # these two are the check that the format change is invisible to the chip.
+    ok_3l = compare("VGI v3 looped", v3l_s, vgc_s)
+    ok_3u = compare("VGI v3 unrolled", v3u_s, vgc_s)
+    # the builds must of course agree with each other too
+    ok_lu = (vl_s == vu_s) and (v3l_s == v3u_s)
+    print("  %-16s %s" % ("looped==unrolled", "YES" if ok_lu else "*** NO ***"))
 
     print("\nper-frame cost incl. SN writes (cycles @ 2 MHz):")
     stats("VGC (stock)", vgc_pf)
-    stats("VGI looped", vl_pf)
-    stats("VGI unrolled", vu_pf)
+    stats("VGI v2 looped", vl_pf)
+    stats("VGI v2 unrolled", vu_pf)
+    stats("VGI v3 looped", v3l_pf)
+    stats("VGI v3 unrolled", v3u_pf)
     print("  note: VGI writes all 11 registers every frame; VGC writes only the")
     print("        ones its RLE says changed - so this includes that difference.")
+    print("        v3 decodes 8 columns instead of 11 and expands the three tone")
+    print("        periods through a table, which is where its saving comes from.")
 
-    ok = ok_l and ok_u and ok_lu
+    ok = ok_l and ok_u and ok_3l and ok_3u and ok_lu
     print("\nRESULT:", "PASS" if ok else "FAIL")
     return 0 if ok else 1
 

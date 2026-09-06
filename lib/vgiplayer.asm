@@ -24,16 +24,31 @@
 ;
 ; sn_write and sn_reset below are byte-identical to lib/vgcplayer.asm.
 ;
-; BUILD FLAG (must be passed via -D on every build, like OPT in test/vgc_opt):
+; BUILD FLAGS (both must be passed via -D on every build, like OPT in
+; test/vgc_opt):
 ;   -D VGI_UNROLL=0  compact looped decoder  (default, smallest code)
 ;   -D VGI_UNROLL=1  per-stream unrolled decoder (a little faster, +code)
-; Both are byte-exact and both honour the buffer page passed to vgm_init.
+;   -D VGI_V3=0      play .vgi v2 files: 11 columns, an 11 x 256 workspace
+;   -D VGI_V3=1      play .vgi v3 files: 8 columns and a period table per
+;                    channel, so an 8 x 256 workspace - 23-29% smaller files
+;                    AND three fewer streams to decode a frame
+; All four combinations are byte-exact against the VGC player and all honour
+; the buffer page passed to vgm_init. A build plays one format, not both: the
+; version byte is checked at mount and a mismatched file is refused (the player
+; reports finished rather than decoding noise).
 ;******************************************************************
 
 .vgm_start
 
 VGI_SKIP        = &0f       ; noise "skip" marker (unchanged frame, don't rewrite)
+
+IF VGI_V3
+VGI_NUM_STREAMS = 8         ; 3 period indices, noise, 4 volumes
+VGI_VERSION     = 3
+ELSE
 VGI_NUM_STREAMS = 11        ; one per SN76489 register column
+VGI_VERSION     = 2
+ENDIF
 
 ;--------------------------------------------------
 ; user callable routines:
@@ -47,13 +62,14 @@ VGI_NUM_STREAMS = 11        ; one per SN76489 register column
 ; vgm_init
 ;-------------------------------------------
 ; Initialise playback routine
-;  A points to HI byte of a page aligned 2.75Kb (11x256) RAM buffer address
+;  A points to HI byte of a page aligned VGI_NUM_STREAMS x 256 RAM buffer
+;  (2.75Kb for a v2 build, 2Kb for a v3 build)
 ;  X/Y point to the VGI data stream to be played
 ;  C=1 for looped playback
 ;-------------------------------------------
 .vgm_init
 {
-    ; stash the buffer page (the 11 ring windows live at A, A+1 .. A+10)
+    ; stash the buffer page (the ring windows live at A, A+1 .. A+n-1)
     sta vgm_buffers
     lda #0
     ror a  ; move carry into A bit7
@@ -156,11 +172,29 @@ VGI_NUM_STREAMS = 11        ; one per SN76489 register column
 ; Not user callable.
 ;-------------------------------------------
 
+IF VGI_V3
+; Bias one 16-bit header pointer at (vgi_src),y by the load address and poke it
+; into the operand of the absolute,Y load at `addr`. Y advances by 2.
+MACRO VGI_MOUNT_TABLE addr
+    lda (vgi_src),y
+    clc
+    adc vgm_source+0
+    sta addr+1
+    iny
+    lda (vgi_src),y
+    adc vgm_source+1
+    sta addr+2
+    iny
+ENDMACRO
+ENDIF
+
 ; Initialise the player for the in-memory VGI data stream at vgm_source.
 ; .vgi header layout (little-endian):
 ;   +0  'V','G','I',ver
 ;   +4  nframes (16-bit)
-;   +6  11 x stream offset (16-bit, relative to file start)
+;   +6  VGI_NUM_STREAMS x stream offset (16-bit, relative to file start)
+; and, for v3 only:
+;   +22 6 x period table offset (16-bit): low then high table, per channel
 ; Each stream offset is biased by vgm_source to give an absolute read pointer,
 ; and each stream's decode state is zeroed. (Reused for looping.)
 .vgm_stream_mount
@@ -175,6 +209,17 @@ VGI_NUM_STREAMS = 11        ; one per SN76489 register column
     sta vgi_src+0
     lda vgm_source+1
     sta vgi_src+1
+
+    ; Refuse a file this build cannot play. Without this the decoder would
+    ; happily read v2 columns as v3 ones and play convincing noise.
+    ldy #3
+    lda (vgi_src),y
+    cmp #VGI_VERSION
+    beq version_ok
+    lda #&ff
+    sta vgm_finished
+    rts
+.version_ok
 
     ; frame counter = nframes (header +4/+5)
     ldy #4
@@ -212,6 +257,19 @@ VGI_NUM_STREAMS = 11        ; one per SN76489 register column
     inx
     cpx #VGI_NUM_STREAMS
     bne mount_loop
+
+IF VGI_V3
+    ; The six period-table pointers live at +22. Bias each by the load address
+    ; and poke it straight into the operand of its table load, so a lookup in
+    ; the frame loop is one absolute,Y read and nothing else.
+    ldy #22
+    VGI_MOUNT_TABLE v3_t0lo
+    VGI_MOUNT_TABLE v3_t0hi
+    VGI_MOUNT_TABLE v3_t1lo
+    VGI_MOUNT_TABLE v3_t1hi
+    VGI_MOUNT_TABLE v3_t2lo
+    VGI_MOUNT_TABLE v3_t2hi
+ENDIF
     rts
 }
 
@@ -321,6 +379,48 @@ MACRO VGI_DECODE_U strm
 }
 ENDMACRO
 
+IF VGI_V3
+
+; one frame: decode 8 streams, expand the three period indices through their
+; tables and write the SN76489 (unrolled). sn_write clobbers X but never Y, so
+; the index lives in Y across the pair of writes it feeds.
+.vgm_decode_frame
+    lda vgm_buffers
+    sta vgi_ring+1          ; ring page for stream 0 (vgi_ring+0 = 0 from mount)
+
+    VGI_DECODE_U 0  : tay                       ; tone0 period index
+.v3_t0lo
+    lda &ffff,y : ora #&80 : jsr sn_write       ; latch + low 4 bits
+.v3_t0hi
+    lda &ffff,y :            jsr sn_write       ; high 6 bits
+    inc vgi_ring+1
+    VGI_DECODE_U 1  : tay                       ; tone1 period index
+.v3_t1lo
+    lda &ffff,y : ora #&a0 : jsr sn_write
+.v3_t1hi
+    lda &ffff,y :            jsr sn_write
+    inc vgi_ring+1
+    VGI_DECODE_U 2  : tay                       ; tone2 period index
+.v3_t2lo
+    lda &ffff,y : ora #&c0 : jsr sn_write
+.v3_t2hi
+    lda &ffff,y :            jsr sn_write
+    inc vgi_ring+1
+    VGI_DECODE_U 3  : cmp #VGI_SKIP : beq v3_nonoise
+    ora #&e0 : jsr sn_write                     ; noise control (only if changed)
+.v3_nonoise
+    inc vgi_ring+1
+    VGI_DECODE_U 4  : ora #&90 : jsr sn_write   ; vol0
+    inc vgi_ring+1
+    VGI_DECODE_U 5  : ora #&b0 : jsr sn_write   ; vol1
+    inc vgi_ring+1
+    VGI_DECODE_U 6  : ora #&d0 : jsr sn_write   ; vol2
+    inc vgi_ring+1
+    VGI_DECODE_U 7  : ora #&f0 : jsr sn_write   ; vol3 (noise)
+    rts
+
+ELSE
+
 ; one frame: decode all 11 streams and write the SN76489 (unrolled)
 .vgm_decode_frame
 {
@@ -352,6 +452,8 @@ ENDMACRO
     VGI_DECODE_U 10 : ora #&f0 : jsr sn_write   ; vol3 (noise)
     rts
 }
+
+ENDIF ; VGI_V3
 
 ELSE
 
@@ -429,6 +531,44 @@ ELSE
     rts
 }
 
+IF VGI_V3
+
+; one frame: decode 8 streams, then expand and write the SN76489 (looped)
+.vgm_decode_frame
+    ldx #0
+.v3_loop
+    jsr vgm_decode_stream
+    sta regbuf,x
+    inx
+    cpx #VGI_NUM_STREAMS
+    bne v3_loop
+
+    ldy regbuf+0                                ; tone0 period index
+.v3_t0lo
+    lda &ffff,y : ora #&80 : jsr sn_write       ; latch + low 4 bits
+.v3_t0hi
+    lda &ffff,y :            jsr sn_write       ; high 6 bits
+    ldy regbuf+1
+.v3_t1lo
+    lda &ffff,y : ora #&a0 : jsr sn_write
+.v3_t1hi
+    lda &ffff,y :            jsr sn_write
+    ldy regbuf+2
+.v3_t2lo
+    lda &ffff,y : ora #&c0 : jsr sn_write
+.v3_t2hi
+    lda &ffff,y :            jsr sn_write
+    lda regbuf+3 : cmp #VGI_SKIP : beq v3_nonoise
+    ora #&e0 : jsr sn_write                     ; noise control (only if changed)
+.v3_nonoise
+    lda regbuf+4 : ora #&90 : jsr sn_write      ; vol0
+    lda regbuf+5 : ora #&b0 : jsr sn_write      ; vol1
+    lda regbuf+6 : ora #&d0 : jsr sn_write      ; vol2
+    lda regbuf+7 : ora #&f0 : jsr sn_write      ; vol3 (noise)
+    rts
+
+ELSE
+
 ; one frame: decode all 11 streams, then write the SN76489 (looped)
 .vgm_decode_frame
 {
@@ -456,6 +596,8 @@ ELSE
     rts
 }
 
+ENDIF ; VGI_V3
+
 ENDIF ; VGI_UNROLL
 
 
@@ -471,7 +613,7 @@ ENDIF ; VGI_UNROLL
 .vgm_framehi  equb 0
 .vgi_tmp      equb 0    ; scratch (match offset)
 
-; per-stream decode state (11 streams)
+; per-stream decode state (VGI_NUM_STREAMS of them)
 .st_srcL  skip VGI_NUM_STREAMS   ; stream read ptr LO
 .st_srcH  skip VGI_NUM_STREAMS   ; stream read ptr HI
 .st_rem   skip VGI_NUM_STREAMS   ; bytes left in current run (0 => fetch new token)
@@ -480,7 +622,7 @@ ENDIF ; VGI_UNROLL
 .st_head  skip VGI_NUM_STREAMS   ; ring write index
 
 IF VGI_UNROLL=0
-.regbuf   skip VGI_NUM_STREAMS   ; this frame's 11 decoded register values (looped)
+.regbuf   skip VGI_NUM_STREAMS   ; this frame's decoded column values (looped)
 ENDIF
 
 .vgm_end

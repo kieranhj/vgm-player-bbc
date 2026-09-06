@@ -24,9 +24,14 @@ INCLUDE "../../lib/vgiplayer.asm"
 .vgm_buffer_start
 ALIGN 256
 .vgm_stream_buffers
-  SKIP 11*256          ; 11 x 256-byte ring windows (2.75 KB)
+  SKIP VGI_NUM_STREAMS*256    ; one 256-byte ring window per column
+                              ; (11 pages for v2, 8 for v3)
 .vgm_buffer_end
 .vgm_data
+IF VGI_V3
+INCBIN "../../music/vgi/acid_demo.v3.vgi"
+ELSE
 INCBIN "../../music/vgi/acid_demo.vgi"
+ENDIF
 .end
 SAVE "Vgi", start, end, start

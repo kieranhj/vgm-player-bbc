@@ -14,10 +14,21 @@ repo) and exposes the **same user API** as the VGC player —
 `vgm_init` / `vgm_update` / `sn_reset` / `sn_write` — so it is a drop-in
 alternative for code that already drives `lib/vgcplayer.asm`.
 
-It is **not** a replacement for the VGC player: `.vgi` is ~1.4× the size of
-`.vgc` and needs a larger workspace (11×256 vs 8×256). You would choose it when
-the *worst-case* per-frame time matters more than size — e.g. a raster-budgeted
-demo that must never overrun its CPU slice.
+It builds for either of two file versions, and **v3 is the one to use**:
+
+- `-D VGI_V3=0` plays `.vgi` **v2**: 11 register columns, an 11×256 workspace,
+  files ~1.4× `.vgc`. Chosen over `.vgc` when the *worst-case* per-frame time
+  matters more than size — a raster-budgeted demo that must never overrun.
+- `-D VGI_V3=1` plays `.vgi` **v3**: 8 columns, because each channel's tone
+  period is a byte index into a table the packer builds. Files are 21-29%
+  smaller (roughly `.vgc`'s size), the workspace drops to 8×256 = 2 KB, and
+  there are three fewer streams to decode — so it is **cheaper per frame than
+  v2 and cheaper than `.vgc` too**, at both the mean and the worst frame. The
+  format is documented in the packer repo (`docs/vgi-format.md`).
+
+A build plays one version, not both: `vgm_init` checks the file's version byte
+and refuses a mismatch (the player reports finished rather than decoding
+noise).
 
 ## The problem it addresses: VGC's per-frame cost spikes
 
@@ -49,18 +60,25 @@ the one place VGI, like VGC, deliberately skips a write.
 
 ## Byte-exact with the VGC player
 
-`test/vgi/measure.py` builds the VGC player and **both** VGI builds, runs each
-through a py65 6502 simulator over the same tune (`acid_demo`), reconstructs the
-SN76489 register state from the `&FE4F` writes each frame, and asserts the three
-players drive the chip **identically**. Over all **9602 frames** of `acid_demo`:
+`test/vgi/measure.py` builds the VGC player and **all four** VGI builds
+(looped/unrolled × v2/v3), runs each through a py65 6502 simulator over the same
+tune (`acid_demo`), reconstructs the SN76489 register state from the `&FE4F`
+writes each frame, and asserts every player drives the chip **identically**.
+Over all **9602 frames** of `acid_demo`:
 
 ```
-VGI looped       SN76489 state IDENTICAL over all 9602 frames
-VGI unrolled     SN76489 state IDENTICAL over all 9602 frames
+VGI v2 looped    SN76489 state IDENTICAL over all 9602 frames
+VGI v2 unrolled  SN76489 state IDENTICAL over all 9602 frames
+VGI v3 looped    SN76489 state IDENTICAL over all 9602 frames
+VGI v3 unrolled  SN76489 state IDENTICAL over all 9602 frames
 ```
+
+The v3 rows are the ones that matter for the format change: those builds read a
+**different file** — 8 indexed columns and a period table instead of 11 raw
+columns — and still put the same bytes into the chip.
 
 (The raw write *streams* differ in length — VGC writes only the registers its
-RLE says changed, VGI writes all 11 columns every frame — so the test compares
+RLE says changed, VGI writes all 11 registers every frame — so the test compares
 reconstructed chip *state*, which is the playback-equivalence that matters.)
 
 ## Measured per-frame cost
@@ -71,14 +89,27 @@ Same harness, per-frame cost **including the SN76489 writes**, `acid_demo`
 | player | min | mean | p99 | max |
 |---|--:|--:|--:|--:|
 | VGC (stock) | 294 | 1788 | 4022 | **5321** |
-| VGI looped (default) | 1480 | 1569 | 2216 | **2674** |
-| VGI unrolled (`VGI_UNROLL=1`) | 1052 | 1149 | 1863 | **2377** |
+| VGI v2 looped | 1483 | 1572 | 2219 | **2677** |
+| VGI v2 unrolled | 1052 | 1149 | 1863 | **2377** |
+| VGI v3 looped | 1214 | 1277 | 1762 | **2125** |
+| VGI v3 unrolled | 917 | **985** | 1511 | **1894** |
 
 The shape is the whole point. VGC is cheap on average but spikes to **5321**
-cycles (13% of a 50 Hz frame). Both VGI builds sit in a tight band and their
-**worst** frame is roughly **half** VGC's, even though VGI re-writes all 11
-registers every frame (which lifts its *floor* — that is why VGI's minimum is
-higher). The unrolled build is faster across the board for more code.
+cycles (13% of a 50 Hz frame). Every VGI build sits in a tight band, even though
+VGI re-writes all 11 registers every frame (which lifts its *floor* — that is
+why VGI's minimum is higher). The unrolled build is faster across the board for
+more code.
+
+**v3 costs less than v2 everywhere**: −295 cycles at the mean and −552 at the
+worst frame for the looped build, −164 and −483 for the unrolled one. Three
+fewer per-stream state machines is the whole of it; the two table lookups that
+replace them are an `absolute,Y` load each (`sn_write` clobbers X but never Y,
+so the index survives the pair of writes it feeds).
+
+And **VGI v3 unrolled beats the stock VGC player at both ends** — mean 985
+against 1788, worst frame 1894 against 5321 — on a file about the same size.
+That was not true of v2, which bought its bounded worst case with a higher
+mean.
 
 > Prior findings (the motivation). A wider study in the vgm-packer repo
 > (`beeb/`, decode cost only, SN writes stubbed, 11-tune / 74052-frame corpus)
@@ -99,17 +130,23 @@ Measured from these builds (`vgm_start`..`vgm_end`, i.e. code + resident state;
 | player | code + state | decode buffer | zero page |
 |---|--:|--:|--:|
 | VGC (stock) | 555 | 2048 (8×256) | 8 |
-| VGI looped (default) | 545 | 2816 (11×256) | 4 |
-| VGI unrolled (`VGI_UNROLL=1`) | 1050 | 2816 (11×256) | 4 |
+| VGI v2 looped | 559 | 2816 (11×256) | 4 |
+| VGI v2 unrolled | 1064 | 2816 (11×256) | 4 |
+| VGI v3 looped | 663 | **2048 (8×256)** | 4 |
+| VGI v3 unrolled | **1018** | **2048 (8×256)** | 4 |
 
 So the looped VGI player is about the same code size as the stock VGC player and
-uses *fewer* zero-page bytes, at the cost of a larger (11-page) ring workspace.
-The unrolled build spends ~0.5 KB more code to buy the lower per-frame cost.
+uses *fewer* zero-page bytes. v3 removes three ring pages, 768 bytes, and the
+tune it plays is ~25% smaller as well; the period table it adds lives in the
+file, not in the player. The looped v3 build costs 104 bytes more code for the
+table expansion, while the **unrolled v3 build is 46 bytes SMALLER** than
+unrolled v2 — three fewer streams to inline more than pays for the lookups.
 
-## Looped vs unrolled
+## Build flags
 
-`lib/vgiplayer.asm` builds two ways, selected by a `-D` define (passed on
-**every** build, exactly like `OPT` in `test/vgc_opt`):
+`lib/vgiplayer.asm` needs **two** `-D` defines on **every** build, exactly like
+`OPT` in `test/vgc_opt`. `VGI_V3` picks the file version (see the top of this
+document); `VGI_UNROLL` picks the decoder shape:
 
 - `-D VGI_UNROLL=0` — compact looped decoder (**default**). One decode
   subroutine driven by an X stream index.
@@ -120,18 +157,23 @@ The unrolled build spends ~0.5 KB more code to buy the lower per-frame cost.
   zero-page pointer and advanced per stream, so neither needs a fixed buffer
   address).
 
+All four combinations are byte-exact against the VGC player, and
+`test/vgi/measure.py` builds and checks all four.
+
 ## Using it
 
 ```
 INCLUDE "lib/vgiplayer.h.asm"        ; declares 4 zero page bytes (see vgi_demo.asm)
 ...
-INCLUDE "lib/vgiplayer.asm"          ; the player (build with -D VGI_UNROLL=0 or 1)
+INCLUDE "lib/vgiplayer.asm"          ; the player (needs -D VGI_UNROLL and -D VGI_V3)
 ```
 
 API (identical to the VGC player):
 
-- `vgm_init` — `A` = HI byte of a **page-aligned 2.75 KB (11×256)** workspace;
-  `X`/`Y` = LO/HI of the `.vgi` data; `C=1` to loop.
+- `vgm_init` — `A` = HI byte of a page-aligned `VGI_NUM_STREAMS`×256 workspace
+  (**2 KB for a v3 build**, 2.75 KB for v2); `X`/`Y` = LO/HI of the `.vgi` data;
+  `C=1` to loop. It also checks the file's version byte and refuses a file this
+  build cannot play.
 - `vgm_update` — call at 50 Hz; returns zero while playing, non-zero when the
   tune has finished (a final update silences the chip, mirroring the VGC
   player's end-of-stream behaviour).
@@ -141,7 +183,7 @@ See `vgi_demo.asm` for a complete bootable example (it brackets `vgm_update`
 with palette writes so the per-frame cost is visible as a raster band):
 
 ```
-beebasm -i vgi_demo.asm -D VGI_UNROLL=0 -do vgi_demo.ssd -boot Main -title VGIPLAY
+beebasm -i vgi_demo.asm -D VGI_UNROLL=0 -D VGI_V3=1 -do vgi_demo.ssd -boot Main -title VGIPLAY
 ```
 
 ## Verifying correctness
@@ -152,5 +194,7 @@ pip install py65 numpy        # one-off
 python measure.py             # set $BEEBASM if beebasm is not auto-found
 ```
 
-It prints `SN76489 state IDENTICAL` for both VGI builds and `RESULT: PASS` when
-they match the stock VGC player frame-for-frame.
+It prints `SN76489 state IDENTICAL` for all four VGI builds and `RESULT: PASS`
+when they match the stock VGC player frame-for-frame. It needs both `.vgi` files
+of the test tune: `music/vgi/acid_demo.vgi` (v2) and `music/vgi/acid_demo.v3.vgi`
+(v3), packed by `vgipacker.py` with and without `--v3`.

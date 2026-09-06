@@ -9,12 +9,12 @@
 ; exactly like lib/vgcplayer.h.asm is used for the VGC player.
 ;
 ; The VGI player needs only 4 zero page bytes (two indirect pointers).
-; All other state (the 11 per-stream decode contexts, the frame counter
-; and a scratch byte) lives in absolute memory inside lib/vgiplayer.asm.
+; All other state (the per-stream decode contexts, the frame counter and a
+; scratch byte) lives in absolute memory inside lib/vgiplayer.asm.
 ;
-; It also needs a page-aligned 2.75 KB (11 x 256) decode workspace, the HI
-; byte of which is passed to vgm_init in A. (The VGC player uses 2 KB / 8
-; streams; VGI has 11 register streams, hence 11 pages.)
+; It also needs a page-aligned decode workspace of VGI_NUM_STREAMS x 256, the
+; HI byte of which is passed to vgm_init in A: 2 KB for a v3 build (8 columns)
+; and 2.75 KB for a v2 build (11 register columns). The VGC player uses 2 KB.
 ;******************************************************************
 
 ;-------------------------------

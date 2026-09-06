@@ -13,9 +13,10 @@
 ; VGI decoder is bounded, that band sits nearly still frame-to-frame - unlike
 ; the VGC player, whose band jitters as its RLE/LZ4 cost spikes.
 ;
-; Build (the player needs the VGI_UNROLL flag on every build):
-;   beebasm -i vgi_demo.asm -D VGI_UNROLL=0 -do vgi_demo.ssd -boot Main -title VGIPLAY
-;   (use -D VGI_UNROLL=1 for the faster unrolled decoder)
+; Build (the player needs the VGI_UNROLL and VGI_V3 flags on every build):
+;   beebasm -i vgi_demo.asm -D VGI_UNROLL=0 -D VGI_V3=0 -do vgi_demo.ssd -boot Main -title VGIPLAY
+;   (VGI_UNROLL=1 for the faster unrolled decoder; VGI_V3=1 plays the
+;    v3 tune, which is 25% smaller and needs 3 fewer ring pages)
 ;******************************************************************
 
 
@@ -95,17 +96,21 @@ ENDIF
 
 .vgm_buffer_start
 
-; reserve space for the vgi decode buffers (11x256 = 2.75Kb)
+; reserve space for the vgi decode buffers (11x256 = 2.75Kb for v2, 8x256 = 2Kb for v3)
 ALIGN 256
 .vgm_stream_buffers
-    skip 11*256
+    skip VGI_NUM_STREAMS*256
 
 
 .vgm_buffer_end
 
 ; include your tune of choice here, some samples provided....
 .vgm_data
+IF VGI_V3
+INCBIN "music/vgi/acid_demo.v3.vgi"
+ELSE
 INCBIN "music/vgi/acid_demo.vgi"
+ENDIF
 
 
 
